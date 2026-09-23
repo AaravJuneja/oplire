@@ -10,7 +10,7 @@ const VERSION: &str = "2.4.0";
 #[derive(Parser, Debug)]
 #[command(name = "oplire")]
 #[command(version = VERSION)]
-#[command(about = "OpenCode Limit Reset + Anthropic Proxy Bridge", long_about = None)]
+#[command(about = "OpenCode V2 Responses proxy + WARP rate limit reset", long_about = None)]
 struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
@@ -48,10 +48,6 @@ enum Commands {
         #[arg(long, default_value = "5000")]
         warp_delay: u64,
     },
-    Connect {
-        #[command(subcommand)]
-        target: ConnectTarget,
-    },
     Watch {
         #[arg(long, default_value = "http://localhost:3000")]
         upstream: String,
@@ -78,44 +74,13 @@ enum Commands {
     },
     Doctor {},
     Setup {},
-    Models {
-        #[arg(long, default_value = "http://localhost:3000")]
-        upstream: String,
-    },
 }
 
 #[derive(Subcommand, Debug)]
 enum InstallTarget {
-    /// Install Cloudflare WARP
     Warp {},
-    /// Install OpenCode desktop app
     Opencode {},
-    /// Install Claude Code CLI
-    ClaudeCode {},
-    /// Install all: WARP + OpenCode + Claude Code
     All {},
-}
-
-#[derive(Subcommand, Debug)]
-enum ConnectTarget {
-    ClaudeCode {
-        #[arg(long, default_value = "127.0.0.1:8080")]
-        listen: String,
-        #[arg(long, default_value = "http://localhost:3000")]
-        upstream: String,
-        #[arg(long)]
-        api_key: Option<String>,
-        #[arg(long, default_value = "3")]
-        max_retries: u32,
-        #[arg(long, default_value = "5000")]
-        warp_delay: u64,
-        #[arg(long)]
-        model: Option<String>,
-        #[arg(long)]
-        system_prompt: Option<String>,
-        #[arg(last = true)]
-        claude_args: Vec<String>,
-    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -144,14 +109,13 @@ fn config_path() -> PathBuf {
 }
 
 fn dirs_config_dir() -> Option<PathBuf> {
-    if cfg!(target_os = "macos") {
-        if let Ok(home) = std::env::var("HOME") {
+    if cfg!(target_os = "macos")
+        && let Ok(home) = std::env::var("HOME") {
             let mut p = PathBuf::from(home);
             p.push("Library");
             p.push("Application Support");
             return Some(p);
         }
-    }
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         return Some(PathBuf::from(xdg));
     }
@@ -165,13 +129,11 @@ fn dirs_config_dir() -> Option<PathBuf> {
 
 fn load_config() -> AppConfig {
     let path = config_path();
-    if path.exists() {
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(config) = serde_json::from_str(&content) {
+    if path.exists()
+        && let Ok(content) = fs::read_to_string(&path)
+            && let Ok(config) = serde_json::from_str(&content) {
                 return config;
             }
-        }
-    }
     AppConfig::default()
 }
 
@@ -187,10 +149,6 @@ fn save_config(config: &AppConfig) -> Result<(), String> {
 
 fn check_warp_installed() -> bool {
     Command::new("warp-cli").arg("--version").output().is_ok()
-}
-
-fn check_claude_installed() -> bool {
-    Command::new("claude").arg("--version").output().is_ok()
 }
 
 fn check_opencode_installed() -> bool {
@@ -293,85 +251,7 @@ fn run_interactive(cmd: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
-fn fetch_models(upstream: &str) -> Result<Vec<(String, String)>, String> {
-    let models_url = format!("{}/v1/models", upstream.trim_end_matches('/'));
 
-    let resp = reqwest::blocking::Client::new()
-        .get(&models_url)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .map_err(|e| e.to_string())?;
-
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-
-    let data = resp.json::<serde_json::Value>().map_err(|e| e.to_string())?;
-
-    let models = data
-        .get("data")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| "No models in response".to_string())?;
-
-    Ok(models
-        .iter()
-        .filter_map(|m| {
-            let id = m.get("id").and_then(|v| v.as_str())?.to_string();
-            let name = match m.get("name")
-                .or_else(|| m.get("display_name"))
-                .and_then(|v| v.as_str())
-            {
-                Some(n) => n.to_string(),
-                None => id.replace('-', " ")
-                    .split_whitespace()
-                    .map(|w| {
-                        let mut c = w.chars();
-                        match c.next() {
-                            None => String::new(),
-                            Some(ch) => format!(
-                                "{}{}",
-                                ch.to_uppercase().collect::<String>(),
-                                c.as_str()
-                            ),
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            };
-            Some((id, name))
-        })
-        .collect())
-}
-
-fn select_model_interactively(models: &[(String, String)]) -> Option<String> {
-    use std::io::{self, Write};
-
-    if models.is_empty() {
-        return None;
-    }
-
-    println!();
-    println!("{}", "Available models:".bold());
-    println!();
-
-    for (i, (id, name)) in models.iter().enumerate() {
-        println!("  {} {} — {}", format!("[{}]", i + 1).dimmed(), id.bold().yellow(), name);
-    }
-
-    println!();
-    print!("{} Select model (1-{}): ", "→".cyan(), models.len());
-    io::stdout().flush().ok()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).ok()?;
-    let num: usize = input.trim().parse().ok()?;
-
-    if num >= 1 && num <= models.len() {
-        Some(models[num - 1].0.clone())
-    } else {
-        None
-    }
-}
 
 fn print_banner() {
     println!(
@@ -422,89 +302,6 @@ fn main() {
     let warp_installed = check_warp_installed();
 
     match &cli.command {
-        Commands::Models { upstream } => {
-            print_banner();
-            println!("{}", "Available Models".bold().cyan());
-            println!();
-            println!("{} Fetching models from {}...", "→".cyan(), upstream.bold());
-            println!();
-
-            let models_url = format!("{}/v1/models", upstream.trim_end_matches('/'));
-
-            match reqwest::blocking::Client::new()
-                .get(&models_url)
-                .timeout(std::time::Duration::from_secs(10))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    match resp.json::<serde_json::Value>() {
-                        Ok(data) => {
-                            if let Some(models) = data.get("data").and_then(|v| v.as_array()) {
-                                if models.is_empty() {
-                                    println!("{} No models found", "[INFO]".yellow());
-                                    return;
-                                }
-
-                                println!("  {}  {:<30}  {}", "#".dimmed(), "ID".bold(), "Name".bold());
-                                println!("  {}", "─".repeat(60).dimmed());
-
-                                for (i, m) in models.iter().enumerate() {
-                                    let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                                    let name: String = match m.get("name")
-                                        .or_else(|| m.get("display_name"))
-                                        .and_then(|v| v.as_str())
-                                    {
-                                        Some(n) => n.to_string(),
-                                        None => id.replace('-', " ").split_whitespace()
-                                            .map(|w| {
-                                                let mut c = w.chars();
-                                                match c.next() {
-                                                    None => String::new(),
-                                                    Some(ch) => format!("{}{}", ch.to_uppercase().collect::<String>(), c.as_str()),
-                                                }
-                                            })
-                                            .collect::<Vec<_>>().join(" "),
-                                    };
-
-                                    println!("  {}  {:<30}  {}",
-                                        format!("[{}]", i + 1).dimmed(),
-                                        id.yellow(),
-                                        name
-                                    );
-                                }
-
-                                println!();
-                                println!("{}", "Usage:".bold());
-                                println!("  {}", "oplire connect claude-code --model <id>".bold().yellow());
-                                println!();
-                                println!("{}", "Examples:".bold());
-                                for m in models.iter().take(3) {
-                                    let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                    if !id.is_empty() {
-                                        println!("  {}", format!("oplire connect claude-code --model {}", id).dimmed());
-                                    }
-                                }
-                            } else {
-                                println!("{} No 'data' field in response", "[ERROR]".red());
-                            }
-                        }
-                        Err(e) => {
-                            println!("{} Failed to parse response: {}", "[ERROR]".red(), e);
-                        }
-                    }
-                }
-                Ok(resp) => {
-                    println!("{} Upstream returned status: {}", "[ERROR]".red(), resp.status());
-                    println!("{} Is OpenCode Zen running on {}?", "Tip:".cyan(), upstream.bold());
-                }
-                Err(e) => {
-                    println!("{} Failed to connect to {}", "[ERROR]".red(), upstream.bold());
-                    println!("{} {}", "Error:".dimmed(), e.to_string().dimmed());
-                    println!("{} Is OpenCode Zen running?", "Tip:".cyan());
-                }
-            }
-        }
-
         Commands::Setup {} => {
             print_banner();
             println!("{}", "Welcome to oplire Setup Wizard".bold().green());
@@ -515,7 +312,7 @@ fn main() {
             let mut steps_needed = Vec::new();
 
             if !check_node_installed() {
-                steps_needed.push(("Node.js", "npm install -g npm", "Required for Claude Code and OpenCode"));
+                steps_needed.push(("Node.js", "npm install -g npm", "Required for OpenCode"));
             }
             if !warp_installed {
                 steps_needed.push(("Cloudflare WARP", "oplire install warp", "Required for rate limit reset"));
@@ -523,15 +320,12 @@ fn main() {
             if !check_opencode_installed() {
                 steps_needed.push(("OpenCode", "oplire install opencode", "AI coding assistant backend"));
             }
-            if !check_claude_installed() {
-                steps_needed.push(("Claude Code", "oplire install claudecode", "AI coding assistant CLI"));
-            }
 
             if steps_needed.is_empty() {
                 println!("{}", "Everything is already installed!".green().bold());
                 println!();
                 println!("{} Run to get started:", "Tip:".cyan().bold());
-                println!("  {}", "oplire connect claude-code".bold().yellow());
+                println!("  {}", "oplire watch".bold().yellow());
                 return;
             }
 
@@ -558,9 +352,6 @@ fn main() {
                     "OpenCode" => {
                         let _ = run_interactive("oplire", &["install", "opencode"]);
                     }
-                    "Claude Code" => {
-                        let _ = run_interactive("oplire", &["install", "claude-code"]);
-                    }
                     _ => {}
                 }
             }
@@ -570,7 +361,7 @@ fn main() {
                 println!();
                 println!("{}", "Next steps:".bold());
                 println!("  1. {}", "oplire doctor".bold().yellow());
-                println!("  2. {}", "oplire connect claude-code".bold().yellow());
+                println!("  2. {}", "oplire proxy".bold().yellow());
         }
 
         Commands::Install { target } => match target {
@@ -600,7 +391,6 @@ fn main() {
                     {
                         print_step(1, "Adding Cloudflare repository...");
 
-                        // Remove the legacy repository file created by older oplire versions.
                         let _ = run_sudo_command(
                             "rm -f /etc/apt/sources.list.d/cloudflare-warp.list",
                             cli.dry_run,
@@ -612,9 +402,6 @@ fn main() {
                             cli.dry_run, cli.verbose,
                         );
 
-                        // Kali is rolling and reports `kali-rolling`, which is not
-                        // published by Cloudflare. Use Debian stable (trixie), as
-                        // recommended for third-party Debian repositories on Kali.
                         let repo_codename = if os_release.contains("kali") {
                             "trixie"
                         } else {
@@ -671,57 +458,20 @@ fn main() {
                 }
 
                 print_step(1, "Installing OpenCode via npm...");
-                match run_interactive("npm", &["install", "-g", "opencode-ai"]) {
+                match run_interactive("npm", &["install", "-g", "@opencode/cli"]) {
                     Ok(()) => {
                         print_success("OpenCode installed");
                         println!();
                         println!("{}", "Next steps:".bold());
                         println!("  1. {}", "opencode".bold().yellow());
                         println!("  2. {}", "oplire doctor".bold().yellow());
-                        println!("  3. {}", "oplire connect claude-code".bold().yellow());
+                        println!("  3. {}", "oplire proxy".bold().yellow());
                     }
                     Err(e) => {
                         print_fail(&format!("Installation failed: {}", e));
                         println!();
                         println!("{} Try manually:", "Fix:".cyan());
-                        println!("  {}", "npm install -g opencode-ai".bold().yellow());
-                    }
-                }
-            }
-
-            InstallTarget::ClaudeCode {} => {
-                print_banner();
-                println!("{}", "Installing Claude Code".bold().green());
-                println!();
-
-                if check_claude_installed() {
-                    let version = run_command("claude", &["--version"], false, false)
-                        .map(|v| v.trim().to_string())
-                        .unwrap_or_else(|_| "unknown".to_string());
-                    println!("{} Claude Code is already installed ({})", "[INFO]".green(), version.dimmed());
-                    return;
-                }
-
-                if !check_node_installed() {
-                    println!("{} Node.js is required but not found", "[ERROR]".red());
-                    println!("{} Install Node.js first: https://nodejs.org/", "Fix:".cyan());
-                    std::process::exit(1);
-                }
-
-                print_step(1, "Installing Claude Code via npm...");
-                match run_interactive("npm", &["install", "-g", "@anthropic-ai/claude-code"]) {
-                    Ok(()) => {
-                        print_success("Claude Code installed");
-                        println!();
-                        println!("{}", "Next steps:".bold());
-                        println!("  1. {}", "claude --version".bold().yellow());
-                        println!("  2. {}", "oplire connect claude-code".bold().yellow());
-                    }
-                    Err(e) => {
-                        print_fail(&format!("Installation failed: {}", e));
-                        println!();
-                        println!("{} Try manually:", "Fix:".cyan());
-                        println!("  {}", "npm install -g @anthropic-ai/claude-code".bold().yellow());
+                        println!("  {}", "npm install -g @opencode/cli".bold().yellow());
                     }
                 }
             }
@@ -745,135 +495,13 @@ fn main() {
                     let _ = run_interactive("oplire", &["install", "opencode"]);
                 }
 
-                print_step(3, "Checking Claude Code...");
-                if check_claude_installed() {
-                    print_success("Claude Code already installed");
-                } else {
-                    let _ = run_interactive("oplire", &["install", "claude-code"]);
-                }
-
                 println!();
                 println!("{}", "All components installed!".green().bold());
                 println!();
                 println!("{}", "Run to get started:".bold());
-                println!("  {}", "oplire connect claude-code".bold().yellow());
+                println!("  {}", "oplire proxy".bold().yellow());
             }
         },
-
-        Commands::Connect {
-            target: ConnectTarget::ClaudeCode {
-                listen,
-                upstream,
-                api_key,
-                max_retries,
-                warp_delay,
-                model,
-                system_prompt,
-                claude_args,
-            },
-        } => {
-            print_banner();
-            println!("{}", "Claude Code Bridge".bold().green());
-            println!();
-
-            if !check_claude_installed() {
-                eprintln!("{} Claude Code not found in PATH", "[ERROR]".red());
-                eprintln!("{} Install: {}", "Fix:".cyan(), "oplire install claude-code".bold().yellow());
-                std::process::exit(1);
-            }
-
-            let selected_model = match model {
-                Some(m) => m.clone(),
-                None => {
-                    println!("{} Fetching models from {}...", "→".cyan(), upstream.bold());
-                    match fetch_models(upstream) {
-                        Ok(models) => {
-                            if models.is_empty() {
-                                println!("{} No models found, using default", "[WARN]".yellow());
-                                String::new()
-                            } else {
-                                match select_model_interactively(&models) {
-                                    Some(id) => id,
-                                    None => {
-                                        println!("{} No selection made, using default", "[WARN]".yellow());
-                                        String::new()
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            println!("{} Failed to fetch models: {}", "[WARN]".yellow(), e);
-                            println!("{} Starting without model selection", "Tip:".cyan());
-                            String::new()
-                        }
-                    }
-                }
-            };
-
-            let config = ProxyConfig {
-                listen_addr: listen.clone(),
-                opencode_base_url: upstream.clone(),
-                opencode_api_key: api_key.clone(),
-                max_retries: *max_retries,
-                warp_reset_delay_ms: *warp_delay,
-            };
-
-            println!("{} Proxy:      {}", "→".green(), listen.bold());
-            println!("{} Upstream:   {}", "→".green(), upstream.bold());
-            println!("{} Auto-reset: {} (attempts: {})", "→".green(), "enabled".green().bold(), max_retries.to_string().bold());
-            if !selected_model.is_empty() {
-                println!("{} Model:     {}", "→".green(), selected_model.bold());
-            }
-            if let Some(sp) = system_prompt {
-                println!("{} System:    {} chars", "→".green(), sp.len().to_string().bold());
-            }
-            println!();
-
-            println!("{}", "Starting proxy server...".dimmed());
-
-            let proxy_config = config.clone();
-            let listen_clone = listen.clone();
-            let model_clone = selected_model.clone();
-
-            let proxy_handle = std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async {
-                    oplire_reset::proxy::start_proxy_server(proxy_config).await
-                })
-            });
-
-            std::thread::sleep(std::time::Duration::from_millis(1500));
-
-            println!("{}", "Launching Claude Code...".dimmed());
-            println!();
-
-            let mut cmd = Command::new("claude");
-            cmd.env("ANTHROPIC_BASE_URL", format!("http://{}", listen_clone))
-                .env("ANTHROPIC_API_KEY", "oplire-proxy-key");
-
-            if !model_clone.is_empty() {
-                cmd.env("ANTHROPIC_MODEL", &model_clone);
-            }
-
-            if let Some(sp) = system_prompt {
-                cmd.env("CLAUDE_CODE_SYSTEM_PROMPT", sp);
-            }
-
-            if !claude_args.is_empty() {
-                cmd.args(claude_args);
-            }
-
-            let status = cmd.status().map_err(|e| e.to_string()).unwrap_or_else(|_| {
-                eprintln!("{} Failed to launch Claude Code", "[ERROR]".red());
-                std::process::exit(1);
-            });
-
-            println!();
-            println!("{} Claude Code exited with: {}", "Info:".cyan(), status.to_string().bold());
-            println!("{} Shutting down proxy...", "→".green().dimmed());
-
-            drop(proxy_handle);
-        }
 
         Commands::Watch {
             upstream,
@@ -955,16 +583,6 @@ fn main() {
                 checks.push(("WARP CLI", "installed".to_string(), true));
             } else {
                 checks.push(("WARP CLI", "NOT FOUND".to_string(), false));
-                all_ok = false;
-            }
-
-            if check_claude_installed() {
-                let version = run_command("claude", &["--version"], false, false)
-                    .map(|v| v.trim().to_string())
-                    .unwrap_or_else(|_| "unknown".to_string());
-                checks.push(("Claude Code", format!("installed ({})", version), true));
-            } else {
-                checks.push(("Claude Code", "NOT FOUND".to_string(), false));
                 all_ok = false;
             }
 
@@ -1058,10 +676,21 @@ fn main() {
                 println!("{} {}", "Upstream:".bold(), config.upstream);
                 println!("{} {}", "Max Retries:".bold(), config.max_retries);
                 println!("{} {}ms", "WARP Delay:".bold(), config.warp_delay);
+                match &config.api_key {
+                    Some(k) => {
+                        let masked = if k.len() > 8 {
+                            format!("{}...", &k[..8])
+                        } else {
+                            "***".to_string()
+                        };
+                        println!("{} {}", "API Key:".bold(), masked);
+                    }
+                    None => println!("{} {}", "API Key:".bold(), "not set".dimmed()),
+                }
                 println!("{} {}", "Config file:".bold(), config_path().display());
             }
             ConfigAction::Set {
-                key: _,
+                key,
                 listen,
                 upstream,
                 max_retries,
@@ -1073,6 +702,7 @@ fn main() {
                 config.upstream = upstream.clone();
                 config.max_retries = *max_retries;
                 config.warp_delay = *warp_delay;
+                config.api_key = key.clone();
 
                 match save_config(&config) {
                     Ok(()) => {
@@ -1117,7 +747,7 @@ fn main() {
             };
 
             print_banner();
-            println!("{}", "Anthropic ↔ OpenCode Zen Proxy".bold().cyan());
+            println!("{}", "OpenCode V2 Responses Proxy".bold().cyan());
             println!();
             println!("{} Listening on: {}", "→".green(), listen.bold());
             println!("{} Upstream:     {}", "→".green(), upstream.bold());
@@ -1128,11 +758,10 @@ fn main() {
             );
             println!();
             println!(
-                "{} Configure Claude Code to use: {}",
+                "{} OpenCode V2 Responses endpoint: {}",
                 "Tip:".cyan().bold(),
-                format!("http://{}", listen).yellow().bold()
+                format!("http://{}/v1/responses", listen).yellow().bold()
             );
-            println!("{} Or run: {}", "→".cyan(), "oplire connect claude-code".bold());
             println!();
 
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1189,6 +818,12 @@ fn main() {
                         };
                         println!("\n{} {}", "Tunnel:".bold(), tunnel);
                         println!("{} {}", "WARP:".bold(), status);
+                        if !connected {
+                            println!(
+                                "\n{} Start WARP manually first: `warp-cli connect` or the Cloudflare One toggle",
+                                "Tip:".cyan().bold()
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -1293,7 +928,7 @@ fn main() {
             println!();
             println!("{} {}", "Version:".bold(), VERSION);
             println!("{} Rust", "Language:".bold());
-            println!("{} OpenCode rate limit reset + Anthropic proxy", "Purpose:".bold());
+            println!("{} OpenCode Responses proxy + rate limit reset", "Purpose:".bold());
             println!("{} Cloudflare WARP + Axum HTTP", "Infrastructure:".bold());
             println!("{} Berke Oruc", "Author:".bold());
             println!(
@@ -1304,7 +939,6 @@ fn main() {
             println!("{}", "Installation:".bold());
             println!("  oplire install warp          # Install Cloudflare WARP");
             println!("  oplire install opencode      # Install OpenCode");
-            println!("  oplire install claude-code   # Install Claude Code CLI");
             println!("  oplire install all           # Install everything");
             println!("  oplire setup                 # Guided setup wizard");
             println!();
@@ -1314,14 +948,12 @@ fn main() {
             println!("  oplire quick-reset         # Fast WARP IP rotation");
             println!("  oplire stop                # Stop WARP tunnel");
             println!();
-            println!("{}", "Proxy & Claude Code:".bold());
+            println!("{}", "Proxy:".bold());
             println!("  oplire proxy               # Start reverse proxy");
-            println!("  oplire connect claude-code # Proxy + launch Claude Code");
             println!("  oplire daemon              # Background proxy service");
             println!("  oplire watch               # Monitor OpenCode, auto-reset");
             println!();
             println!("{}", "Configuration:".bold());
-            println!("  oplire models              # List available OpenCode models");
             println!("  oplire config show         # Show current config");
             println!("  oplire config set          # Save config");
             println!("  oplire config reset        # Reset to defaults");
@@ -1329,7 +961,7 @@ fn main() {
         }
     }
 
-    if !matches!(&cli.command, Commands::About {} | Commands::Proxy { .. } | Commands::Connect { .. } | Commands::Daemon { .. } | Commands::Watch { .. } | Commands::Doctor {} | Commands::Config { .. } | Commands::Setup {} | Commands::Install { .. } | Commands::Models { .. }) {
+    if !matches!(&cli.command, Commands::About {} | Commands::Proxy { .. } | Commands::Daemon { .. } | Commands::Watch { .. } | Commands::Doctor {} | Commands::Config { .. } | Commands::Setup {} | Commands::Install { .. }) {
         println!("\n{} v{}", "oplire".bold(), VERSION.dimmed());
     }
 }
