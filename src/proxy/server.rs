@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::config::ProxyConfig;
-use crate::proxy::handlers::{handle_messages, handle_model_detail, handle_models, ProxyState};
+use crate::proxy::handlers::{handle_model_detail, handle_models, handle_responses, ProxyState};
 use crate::warp::WarpResolver;
 
 async fn log_requests(
@@ -26,7 +26,8 @@ async fn log_requests(
 
 pub async fn start_proxy_server(config: ProxyConfig) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(300))
         .build()?;
 
     let warp_resolver =
@@ -41,8 +42,7 @@ pub async fn start_proxy_server(config: ProxyConfig) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/v1/models", get(handle_models))
         .route("/v1/models/{model_id}", get(handle_model_detail))
-        .route("/v1/messages", post(handle_messages))
-        .route("/v1/chat/completions", post(handle_messages))
+        .route("/v1/responses", post(handle_responses))
         .route("/health", get(|| async { "OK" }))
         .layer(middleware::from_fn(log_requests))
         .with_state(state);
