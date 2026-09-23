@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn, error};
 
 static ACTIVE_429_COUNT: AtomicU32 = AtomicU32::new(0);
-static RESET_IN_PROGRESS: Mutex<()> = Mutex::const_new(());
+static RESET_IN_PROGRESS: Mutex::<()> = Mutex::const_new(());
 
 pub struct WarpResolver {
     pub max_retries: u32,
@@ -62,18 +62,24 @@ impl WarpResolver {
 
         tokio::time::sleep(Duration::from_millis(1000)).await;
 
-        info!("Step 2: systemctl stop warp-svc");
-        run_sudo_command("systemctl stop warp-svc").await?;
+        info!("Step 2: stopping WARP service");
+        if let Err(e) = stop_warp_service().await {
+            warn!("Stopping WARP service failed or skipped: {}", e);
+        }
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        info!("Step 3: Clearing WARP cache");
-        run_sudo_command("rm -rf /var/lib/cloudflare-warp/*").await?;
+        info!("Step 3: clearing WARP cache");
+        if let Err(e) = clear_warp_cache().await {
+            warn!("Clearing WARP cache failed or skipped: {}", e);
+        }
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        info!("Step 4: systemctl start warp-svc");
-        run_sudo_command("systemctl start warp-svc").await?;
+        info!("Step 4: starting WARP service");
+        if let Err(e) = start_warp_service().await {
+            warn!("Starting WARP service failed or skipped: {}", e);
+        }
 
         tokio::time::sleep(Duration::from_millis(2000)).await;
 
@@ -90,21 +96,96 @@ impl WarpResolver {
     }
 }
 
-async fn run_warp_command(args: &[&str]) -> Result<(), String> {
-    let output = Command::new("warp-cli")
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| format!("Failed to execute warp-cli: {}", e))?;
+fn warp_candidates() -> Vec<&'static str> {
+    vec!["warp-cli"]
+}
 
-    if output.status.success() {
+async fn run_warp_command(args: &[&str]) -> Result<(), String> {
+    let mut last_err = None;
+    for bin in warp_candidates() {
+        let output = Command::new(bin)
+            .args(args)
+            .output()
+            .await;
+
+        match output {
+            Ok(out) if out.status.success() => return Ok(()),
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                last_err = Some(format!("{} {:?} failed: {}", bin, args, stderr.trim()));
+            }
+            Err(e) => {
+                last_err = Some(format!("Failed to execute {}: {}", bin, e));
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| "warp-cli: unknown error".to_string()))
+}
+
+async fn stop_warp_service() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        run_sudo_command("systemctl stop warp-svc").await
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = run_sudo_command("launchctl kickstart -k system/com.cloudflare.warp").await;
         Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("warp-cli {:?} failed: {}", args, stderr.trim()))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        warn!("WARP service stop not implemented for this OS");
+        Ok(())
     }
 }
 
+async fn start_warp_service() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        run_sudo_command("systemctl start warp-svc").await
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = run_sudo_command("launchctl kickstart system/com.cloudflare.warp").await;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        warn!("WARP service start not implemented for this OS");
+        Ok(())
+    }
+}
+
+async fn clear_warp_cache() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        run_sudo_command("rm -rf /var/lib/cloudflare-warp/*").await
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let path = format!("{}/Library/Application Support/Cloudflare/warp", home);
+        let _ = Command::new("rm")
+            .args(["-rf", &format!("{}/cache/*", path)])
+            .output()
+            .await;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        warn!("WARP cache clear not implemented for this OS");
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn run_sudo_command(cmd: &str) -> Result<(), String> {
     let output = Command::new("sudo")
         .arg("-n")
