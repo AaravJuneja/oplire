@@ -9,16 +9,17 @@ _|"""""|_| """ |_|"""""|_|"""""|_|"""""|_|"""""|
      by Berke Oruc
 ```
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![AUR](https://img.shields.io/badge/AUR-2.1.0-blue?style=flat-square)](https://aur.archlinux.org/packages/oplire)
+[![AUR](https://img.shields.io/badge/AUR-2.4.0-blue?style=flat-square)](https://aur.archlinux.org/packages/oplire)
 
 ## What is oplire?
 
-**oplire** is a dual-purpose tool:
+**oplire** is a dual-purpose tool for **free models of OpenCode Zen**
+(like `muse-spark-1.3` free):
 
 1. **WARP Rate Limit Reset** - Rotates your IP via Cloudflare WARP to reset OpenCode rate limits
-2. **Anthropic Proxy Bridge** - Reverse proxy that connects Claude Code to OpenCode Zen's free models with automatic rate limit recovery
+2. **OpenCode V2 Responses Proxy** - Transparent reverse proxy for `/v1/responses` that works around the upstream `encrypted_content` replay bug on any model with encrypted reasoning (e.g. Muse Spark 1.3)
 
 ### How It Works
 
@@ -29,24 +30,32 @@ OpenCode tracks users by IP. When you hit the rate limit:
 3. **Creates** a new tunnel registration (new IP)
 4. **Restarts** WARP with a fresh IP
 
-#### Proxy Bridge Mode
-Claude Code → oplire proxy (127.0.0.1:8080) → OpenCode Zen
-- Translates Anthropic API format to OpenAI format
-- Streams SSE responses in real-time
-- Exposes free models via `/v1/models` endpoint
+#### Responses Proxy Mode
+OpenCode V2 → oplire proxy (127.0.0.1:8080) → OpenCode Zen
+- Exposes `/v1/responses` for Responses-API models with encrypted reasoning, like Muse Spark 1.3
+- Two cases: replayed `encrypted_content` gets the stateless treatment
+  (`store: false` + `reasoning: {summary: "auto"}`, stale
+  `encrypted_content`/`id` stripped, one retry on 400 caller errors);
+  clean traffic passes through untouched apart from auth
+- Retries once on upstream 400 `encrypted_content` caller errors
+- Retries once without `reasoning.summary` on org-verification 400s
+- Forwards caller `Authorization` header as-is (normalized, no double `Bearer`)
 - **Auto-resets WARP** on 429 rate limits — transparently
 
 ## Installation
+
+> **Prerequisite:** start and connect Cloudflare WARP **manually** before
+> using oplire (`warp-cli connect`, or the toggle in the Cloudflare One app).
+> oplire never connects WARP on its own — `oplire reset` rotates an already
+> connected tunnel, and every command below assumes WARP is up.
 
 ### Linux (AUR)
 ```bash
 yay -S oplire
 ```
 
-### Windows (winget)
-```powershell
-winget install BerkeOruc.oplire
-```
+> Windows is not supported — oplire is WSL-only (`winget` manifest removed).
+> macOS works via Homebrew below but WARP reset paths are Linux-first.
 
 ### macOS
 ```bash
@@ -63,16 +72,22 @@ sudo cp target/release/oplire /usr/bin/oplire
 
 ## Usage
 
-### Quick Start — Claude Code + Proxy
+### Quick Start — Proxy for OpenCode V2
 ```bash
-# One command: starts proxy + launches Claude Code with correct env vars
-oplire connect claude-code
-
-# With specific model
-oplire connect claude-code --model glm-4.7-free
+# Start the Responses proxy
+oplire proxy
 
 # With custom upstream
-oplire connect claude-code --upstream http://my-opencode-server:3000
+oplire proxy --upstream http://my-opencode-server:3000
+
+# With API key fallback
+oplire proxy --api-key <zen-api-key>
+```
+
+Point OpenCode V2 at the proxy:
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
+export OPENAI_API_KEY=Bearer public
 ```
 
 ### WARP Reset Commands
@@ -81,8 +96,18 @@ oplire reset          # Full WARP tunnel reset
 oplire quick-reset    # Fast IP rotation (no service restart)
 oplire status         # Check WARP connection status
 oplire stop           # Stop WARP tunnel
-oplire install        # Install Cloudflare WARP
+oplire install warp   # Install Cloudflare WARP
 ```
+
+> **WSL + Windows WARP:** oplire is a WSL tool and shells out to `warp-cli`
+> from `PATH`. If your WARP client runs on Windows, expose it to WSL with a
+> symlink or wrapper script — a shell `alias` will **not** work (aliases do
+> not apply to spawned processes, and it must be named `warp-cli`):
+> ```bash
+> sudo ln -s '/mnt/c/Program Files/Cloudflare/Cloudflare WARP/warp-cli.exe' /usr/local/bin/warp-cli
+> # or: printf '#!/bin/bash\nexec /mnt/c/Program\\ Files/Cloudflare/Cloudflare\\ WARP/warp-cli.exe "$@"\n' > ~/.local/bin/warp-cli && chmod +x ~/.local/bin/warp-cli
+> warp-cli status   # verify it resolves before running oplire reset
+> ```
 
 ### Proxy Commands
 ```bash
@@ -101,47 +126,56 @@ oplire config reset   # Reset to defaults
 
 ### Diagnostics
 ```bash
-oplire doctor         # Check WARP, Claude Code, OpenCode setup
+oplire doctor         # Check WARP, OpenCode setup
 oplire about          # Show version and info
 ```
 
-## Claude Code Integration
-
-### Method 1: One-liner (Recommended)
+### OpenCode Plugin (V2)
+The plugin registers `/proxy`, `/proxy-status`, `/proxy-stop` via `ctx.command`.
+`plugin/oplire.ts` is not auto-discovered from `plugin/` — wire it in `opencode.jsonc`:
+```jsonc
+{
+  "plugins": ["./plugin/oplire.ts"]
+}
+```
+Or copy to auto-loaded dirs:
 ```bash
-oplire connect claude-code
+cp plugin/oplire.ts ~/.config/opencode/plugins/oplire.ts
+```
+Then restart OpenCode:
+```
+/proxy
+/proxy 127.0.0.1:8080 http://localhost:3000
+/proxy-status
+/proxy-stop
 ```
 
-### Method 2: Manual Environment
-```bash
-# Start proxy in background
-oplire daemon &
+## Encrypted reasoning fix
 
-# Set environment and launch Claude Code
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
-export ANTHROPIC_API_KEY=oplire-proxy-key
-claude
+The proxy targets the `encrypted_content` replay bug affecting any model
+that returns encrypted reasoning on OpenCode Zen (seen on
+`muse-spark-1.3-contributor-free`, any reasoning effort).
+
+**Root cause:** OpenCode replays caller-bound `encrypted_content` reasoning blobs across turns and after WARP IP rotations. Zen rejects these with:
+```json
+{
+  "message": "reasoning `encrypted_content` was not issued to this caller"
+}
 ```
 
-### Method 3: Claude Code Settings
-```bash
-claude
-> /config
-# Set API Base URL: http://127.0.0.1:8080
-# Set API Key: oplire-proxy-key
-```
+**Fix:** The proxy branches per request (LiteLLM Auto-Router pattern).
+Requests carrying `encrypted_content` get the stateless treatment:
+1. Injects `store: false` + `reasoning: {summary: "auto"}` so Zen returns readable summaries instead of caller-bound blobs
+2. Strips any `encrypted_content`/`id` from replayed reasoning input items before forwarding
+3. Retries once on 400 `encrypted_content` errors after stripping, and once
+   without `reasoning.summary` on org-verification 400s
 
-## Available Free Models
+Requests without `encrypted_content` pass through untouched apart from auth
+normalization — no summaries injected, no ids stripped, no `store` forced.
 
-When connected through the proxy, these models appear in Claude Code's `/models` list:
-
-| Model | ID |
-|-------|-----|
-| GLM 4.7 Free | `glm-4.7-free` |
-| MiniMax M2.1 Free | `minimax-m2.1-free` |
-| Kimi K2.5 Free | `kimi-k2.5-free` |
-| Qwen 2.5 72B Free | `qwen-2.5-72b-free` |
-| Llama 3.3 70B Free | `llama-3.3-70b-free` |
+Linux binary is primary and only. Under WSL, `warp-cli` must resolve from
+`PATH` (see symlink note above) — oplire does not look for the Windows
+install dir itself.
 
 ## Options
 
@@ -152,9 +186,9 @@ When connected through the proxy, these models appear in Claude Code's `/models`
 ## About
 
 ```
-Version: 2.1.0
+Version: 2.4.0
 Language: Rust
-Purpose: OpenCode rate limit reset + Anthropic proxy
+Purpose: OpenCode V2 Responses proxy + rate limit reset
 Infrastructure: Cloudflare WARP + Axum HTTP
 Author: Berke Oruc
 GitHub: https://github.com/BerkeOruc/oplire
