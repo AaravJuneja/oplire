@@ -11,7 +11,7 @@ _|"""""|_| """ |_|"""""|_|"""""|_|"""""|_|"""""|
 
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![AUR](https://img.shields.io/badge/AUR-2.4.0-blue?style=flat-square)](https://aur.archlinux.org/packages/oplire)
+[![AUR](https://img.shields.io/badge/AUR-3.0.0-blue?style=flat-square)](https://aur.archlinux.org/packages/oplire)
 
 ## What is oplire?
 
@@ -186,7 +186,7 @@ install dir itself.
 ## About
 
 ```
-Version: 2.4.0
+Version: 3.0.0
 Language: Rust
 Purpose: OpenCode V2 Responses proxy + rate limit reset
 Infrastructure: Cloudflare WARP + Axum HTTP

@@ -2,13 +2,17 @@ name: Build and Release
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags: [v*]
   pull_request:
-    branches: [main]
+    branches: [master]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -20,47 +24,71 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary: oplire
-            ext: ''
-            os_name: linux
           - os: windows-latest
-            target: x86_64-pc-windows-gnu
+            target: x86_64-pc-windows-msvc
             binary: oplire.exe
-            ext: '.exe'
-            os_name: windows
           - os: macos-latest
             target: x86_64-apple-darwin
             binary: oplire
-            ext: ''
-            os_name: macos
           - os: macos-latest
             target: aarch64-apple-darwin
             binary: oplire
-            ext: ''
-            os_name: macos-arm
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Add target
-        run: rustup target add ${{ matrix.target }}
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package
+        shell: bash
         run: |
-          mkdir -p release
-          cp target/${{ matrix.target }}/release/${{ matrix.binary }} release/oplire-${{ matrix.os_name }}${{ matrix.ext }}
+          VER="${GITHUB_REF_NAME#v}"
+          ARC="oplire-${VER}-${{ matrix.target }}"
+          mkdir -p "$ARC"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$ARC/"
+          cp LICENSE README.md "$ARC/" 2>/dev/null || true
+          if [[ "${{ matrix.os }}" == windows* ]]; then
+            powershell -NoProfile -Command "Compress-Archive -Path '$ARC' -DestinationPath '$ARC.zip'"
+            sha256sum "$ARC.zip" > "$ARC.zip.sha256"
+          else
+            tar czf "$ARC.tar.gz" "$ARC"
+            shasum -a 256 "$ARC.tar.gz" > "$ARC.tar.gz.sha256"
+          fi
 
-      - name: Upload Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: release/*
-          draft: false
-          prerelease: ${{ contains(github.ref, 'beta') }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: ${{ matrix.target }}
+          path: |
+            oplire-*.tar.gz
+            oplire-*.zip
+            oplire-*.sha256
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          body: |
+            v3.0.0
+
+            Transparent OpenCode Zen Responses proxy with encrypted-reasoning handling, WARP IP rotation on 429s, and an OpenCode V2 slash-command plugin.
+
+            Full Changelog: v2.4.0...v3.0.0
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            artifacts/**/*.sha256
