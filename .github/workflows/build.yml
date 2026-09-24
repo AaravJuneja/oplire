@@ -83,11 +83,11 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           body: |
-            v3.0.0
+            ${{ github.ref_name }}
 
             Transparent OpenCode Zen Responses proxy with encrypted-reasoning handling, WARP IP rotation on 429s, and an OpenCode V2 slash-command plugin.
 
-            Full Changelog: v2.4.0...v3.0.0
+            Full Changelog: v2.4.0...${{ github.ref_name }}
           files: |
             artifacts/**/*.tar.gz
             artifacts/**/*.zip
