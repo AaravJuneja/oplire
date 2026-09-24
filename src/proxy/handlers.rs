@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::config::ProxyConfig;
+use crate::proxy::server::build_client;
 use crate::warp::WarpResolver;
 
 pub struct ProxyState {
@@ -193,7 +194,7 @@ pub async fn handle_responses(
     let proxy_api_key = state_guard.config.opencode_api_key.clone();
     let max_retries = state_guard.config.max_retries;
     let reset_delay = state_guard.config.warp_reset_delay_ms;
-    let client = state_guard.client.clone();
+    let mut client = state_guard.client.clone();
     drop(state_guard);
 
     let auth = resolve_auth_header(caller_auth, proxy_api_key);
@@ -226,6 +227,11 @@ pub async fn handle_responses(
                 let resolver = WarpResolver::new(max_retries, reset_delay);
                 if !resolver.handle_429(retry_count - 1).await {
                     return error_response("WARP reset failed, rate limit still active");
+                }
+                if let Ok(fresh) = build_client() {
+                    state.lock().await.client = fresh.clone();
+                    client = fresh;
+                    info!("Rebuilt HTTP client pool after WARP reset");
                 }
             }
             Err(ProxyError::EncryptedContentError) => {

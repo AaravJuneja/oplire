@@ -63,15 +63,20 @@ impl WarpResolver {
         tokio::time::sleep(Duration::from_millis(1000)).await;
 
         info!("Step 2: stopping WARP service");
-        if let Err(e) = stop_warp_service().await {
-            warn!("Stopping WARP service failed or skipped: {}", e);
+        let stopped = stop_warp_service().await.is_ok();
+        if !stopped {
+            warn!("Stopping WARP service failed or skipped");
         }
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         info!("Step 3: clearing WARP cache");
-        if let Err(e) = clear_warp_cache().await {
-            warn!("Clearing WARP cache failed or skipped: {}", e);
+        if stopped {
+            if let Err(e) = clear_warp_cache().await {
+                warn!("Clearing WARP cache failed or skipped: {}", e);
+            }
+        } else {
+            warn!("Skipping cache clear: service may still be running");
         }
 
         tokio::time::sleep(Duration::from_millis(500)).await;

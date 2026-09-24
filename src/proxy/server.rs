@@ -24,11 +24,15 @@ async fn log_requests(
     response
 }
 
-pub async fn start_proxy_server(config: ProxyConfig) -> anyhow::Result<()> {
-    let client = reqwest::Client::builder()
+pub fn build_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .read_timeout(std::time::Duration::from_secs(300))
-        .build()?;
+        .build()
+}
+
+pub async fn start_proxy_server(config: ProxyConfig) -> anyhow::Result<()> {
+    let client = build_client()?;
 
     let warp_resolver =
         WarpResolver::new(config.max_retries, config.warp_reset_delay_ms);
