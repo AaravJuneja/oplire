@@ -2,7 +2,7 @@
 # Contributor: Berke Oruc <berke@oruc.dev>
 
 pkgname=oplire
-pkgver=3.0.0
+pkgver=3.0.1
 pkgrel=1
 pkgdesc="OpenCode Limit Reset + Responses Proxy - Reverse proxy for OpenCode V2 with auto WARP rate limit reset"
 arch=('x86_64')
