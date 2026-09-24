@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-const VERSION: &str = "3.0.1";
+const VERSION: &str = "3.0.2";
 
 #[derive(Parser, Debug)]
 #[command(name = "oplire")]
