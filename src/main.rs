@@ -89,14 +89,14 @@ enum ConfigAction {
     Set {
         #[arg(long)]
         key: Option<String>,
-        #[arg(long, default_value = "127.0.0.1:8080")]
-        listen: String,
-        #[arg(long, default_value = "http://localhost:3000")]
-        upstream: String,
-        #[arg(long, default_value = "3")]
-        max_retries: u32,
-        #[arg(long, default_value = "5000")]
-        warp_delay: u64,
+        #[arg(long)]
+        listen: Option<String>,
+        #[arg(long)]
+        upstream: Option<String>,
+        #[arg(long)]
+        max_retries: Option<u32>,
+        #[arg(long)]
+        warp_delay: Option<u64>,
     },
     Reset {},
 }
@@ -148,12 +148,24 @@ fn save_config(config: &AppConfig) -> Result<(), String> {
 }
 
 fn check_warp_installed() -> bool {
-    Command::new("warp-cli").arg("--version").output().is_ok()
+    Command::new("warp-cli")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn check_opencode_installed() -> bool {
-    Command::new("opencode").arg("--version").output().is_ok()
-        || Command::new("opencode").arg("--help").output().is_ok()
+    Command::new("opencode")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+        || Command::new("opencode")
+            .arg("--help")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
 }
 
 fn check_opencode_running(base_url: &str) -> bool {
@@ -167,7 +179,11 @@ fn check_opencode_running(base_url: &str) -> bool {
 }
 
 fn check_node_installed() -> bool {
-    Command::new("node").arg("--version").output().is_ok()
+    Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn run_command(cmd: &str, args: &[&str], dry_run: bool, verbose: bool) -> Result<String, String> {
@@ -336,6 +352,7 @@ fn main() {
             }
             println!();
 
+            let mut failed_steps: Vec<&str> = Vec::new();
             for (i, (name, _cmd, _)) in steps_needed.iter().enumerate() {
                 println!();
                 print_step(i + 1, &format!("Installing {}...", name));
@@ -346,22 +363,34 @@ fn main() {
                         println!("  {}", "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash".dimmed());
                         println!("  {}", "Then restart your terminal".dimmed());
                     }
-                    "Cloudflare WARP" => {
-                        let _ = run_interactive("oplire", &["install", "warp"]);
+                    "Cloudflare WARP"
+                        if run_interactive("oplire", &["install", "warp"]).is_err() =>
+                    {
+                        failed_steps.push(*name);
                     }
-                    "OpenCode" => {
-                        let _ = run_interactive("oplire", &["install", "opencode"]);
+                    "OpenCode"
+                        if run_interactive("oplire", &["install", "opencode"]).is_err() =>
+                    {
+                        failed_steps.push(*name);
                     }
                     _ => {}
                 }
             }
 
             println!();
-            println!("{}", "Setup complete!".green().bold());
+            if failed_steps.is_empty() {
+                println!("{}", "Setup complete!".green().bold());
                 println!();
                 println!("{}", "Next steps:".bold());
                 println!("  1. {}", "oplire doctor".bold().yellow());
                 println!("  2. {}", "oplire proxy".bold().yellow());
+            } else {
+                println!(
+                    "{}",
+                    format!("Setup finished with errors ({}).", failed_steps.join(", ")).yellow().bold()
+                );
+                println!("{} Run `oplire doctor` to diagnose", "Fix:".cyan());
+            }
         }
 
         Commands::Install { target } => match target {
@@ -698,11 +727,21 @@ fn main() {
             } => {
                 let mut config = load_config();
 
-                config.listen = listen.clone();
-                config.upstream = upstream.clone();
-                config.max_retries = *max_retries;
-                config.warp_delay = *warp_delay;
-                config.api_key = key.clone();
+                if let Some(v) = listen {
+                    config.listen = v.clone();
+                }
+                if let Some(v) = upstream {
+                    config.upstream = v.clone();
+                }
+                if let Some(v) = max_retries {
+                    config.max_retries = *v;
+                }
+                if let Some(v) = warp_delay {
+                    config.warp_delay = *v;
+                }
+                if let Some(v) = key {
+                    config.api_key = Some(v.clone());
+                }
 
                 match save_config(&config) {
                     Ok(()) => {

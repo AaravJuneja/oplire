@@ -25,6 +25,7 @@ pub struct AppConfig {
     pub upstream: String,
     pub max_retries: u32,
     pub warp_delay: u64,
+    #[serde(default)]
     pub api_key: Option<String>,
 }
 

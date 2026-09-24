@@ -71,6 +71,23 @@ fn strip_reasoning_summary(body: &mut Value) {
         }
     }
 }
+
+/// Last-resort fallback when the upstream still reports an encrypted_content
+/// caller error after the proactive strip. Removes every replayed reasoning
+/// item (not just hollow ones) and the top-level reasoning param so the retry
+/// sends a genuinely different, fully stateless body.
+fn purge_reasoning_items(body: &mut Value) {
+    if let Some(items) = body.get_mut("input").and_then(|v| v.as_array_mut()) {
+        items.retain(|item| {
+            item.as_object()
+                .map(|obj| obj.get("type").and_then(|v| v.as_str()) != Some("reasoning"))
+                .unwrap_or(true)
+        });
+    }
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("reasoning");
+    }
+}
 fn has_encrypted_content(body: &Value) -> bool {
     body.get("input")
         .and_then(|v| v.as_array())
@@ -107,12 +124,10 @@ fn inject_responses_fix(body: &mut Value) {
         }
         match obj.get_mut("reasoning") {
             Some(Value::Object(reasoning)) => {
-                if !reasoning.contains_key("summary") {
-                    reasoning.insert(
-                        "summary".to_string(),
-                        Value::String("auto".to_string()),
-                    );
-                }
+                reasoning.insert(
+                    "summary".to_string(),
+                    Value::String("auto".to_string()),
+                );
             }
             Some(_) => {
                 let mut reasoning = serde_json::Map::new();
@@ -239,8 +254,8 @@ pub async fn handle_responses(
                     return error_response("Upstream encrypted_content error persisted after retry");
                 }
                 encrypted_retried = true;
-                strip_encrypted_content_from_input(&mut body_for_retry);
-                info!("Stripped encrypted_content from reasoning items, retrying...");
+                purge_reasoning_items(&mut body_for_retry);
+                info!("Purged reasoning items after encrypted_content error, retrying...");
                 continue;
             }
             Err(ProxyError::SummaryVerificationError) => {
